@@ -21,6 +21,7 @@ xv6.out*
 .vagrant/
 submissions/
 compile_commands.json
++.cache/
 .gdb_history
 .cache/
 commit.patch

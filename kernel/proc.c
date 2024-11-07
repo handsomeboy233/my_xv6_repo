@@ -267,20 +267,38 @@ int fork(void) {
   return pid;
 }
 
+//通过enum来获取当前进程的状态state
+const char* getProcStateString(enum procstate state) {
+    switch (state) {
+        case UNUSED: return "unused";
+        case SLEEPING: return "sleep";
+        case RUNNABLE: return "runble";
+        case RUNNING: return "run";
+        case ZOMBIE: return "zombie";
+        default: return "UNKNOWN";
+    }
+}
+
 // Pass p's abandoned children to init.
 // Caller must hold p->lock.
 void reparent(struct proc *p) {
   struct proc *pp;
 
+  //定义index，为子进程的index
+  int index = 0;
   for (pp = proc; pp < &proc[NPROC]; pp++) {
     // this code uses pp->parent without holding pp->lock.
     // acquiring the lock first could cause a deadlock
     // if pp or a child of pp were also in exit()
     // and about to try to lock p.
+
     if (pp->parent == p) {
       // pp->parent can't change between the check and the acquire()
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
+
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid, index, pp->pid,pp->name, getProcStateString(pp->state));
+      index++;
       pp->parent = initproc;
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
@@ -318,6 +336,7 @@ void exit(int status) {
   // acquired any other proc lock. so wake up init whether that's
   // necessary or not. init may miss this wakeup, but that seems
   // harmless.
+  //唤醒初始进程（initproc），为切换当前进程的子进程的父进程做准备
   acquire(&initproc->lock);
   wakeup1(initproc);
   release(&initproc->lock);
@@ -328,19 +347,26 @@ void exit(int status) {
   // exiting parent, but the result will be a harmless spurious wakeup
   // to a dead or wrong process; proc structs are never re-allocated
   // as anything else.
+  // 保存当前进程的父进程指针，为后续唤醒做准备
   acquire(&p->lock);
   struct proc *original_parent = p->parent;
   release(&p->lock);
 
   // we need the parent's lock in order to wake it up from wait().
   // the parent-then-child rule says we have to lock it first.
+  //将当前进程的 子进程 的父进程指针更改成initproc
+
   acquire(&original_parent->lock);
 
   acquire(&p->lock);
 
+  exit_info("proc %d exit, parent pid %d, name %s, state %s\n", p->pid, original_parent->pid, original_parent->name, getProcStateString(original_parent->state));
+
+
   // Give any children to init.
   reparent(p);
 
+  // 唤醒当前进程的父进程
   // Parent might be sleeping in wait().
   wakeup1(original_parent);
 
@@ -356,7 +382,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr,int flags) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -401,7 +427,14 @@ int wait(uint64 addr) {
     }
 
     // Wait for a child to exit.
-    sleep(p, &p->lock);  // DOC: wait-sleep
+    if (flags != 1){
+      sleep(p, &p->lock);  // DOC: wait-sleep
+    }
+    else{
+      release(&p->lock);
+      return -1;
+    }
+
   }
 }
 
