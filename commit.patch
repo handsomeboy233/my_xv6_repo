@@ -1,8 +1,18 @@
 diff --git a/Makefile b/Makefile
-index b971308..bb37988 100644
+index b971308..1f68a81 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -242,15 +242,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
+@@ -157,6 +157,9 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_sleep\
++	$U/_pingpong\
++	$U/_find\
+ 
+ 
+ ifeq ($(LAB),syscall)
+@@ -242,15 +245,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
  	@echo "*** Now run 'gdb' in another window." 1>&2
  	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
  
@@ -19,3 +29,252 @@ index b971308..bb37988 100644
  
  ##
  ##  FOR testing lab grading script
+diff --git a/commit.patch b/commit.patch
+new file mode 100644
+index 0000000..ae63826
+--- /dev/null
++++ b/commit.patch
+@@ -0,0 +1,21 @@
++diff --git a/Makefile b/Makefile
++index b971308..bb37988 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -242,15 +242,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
++ 	@echo "*** Now run 'gdb' in another window." 1>&2
++ 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
++ 
++-GDBARGS = 
++-GDBARGS += -ex 'set architecture riscv:rv64'
++-GDBARGS += -ex 'target remote 127.0.0.1:$(GDBPORT)'
++-GDBARGS += -ex 'symbol-file kernel/kernel'
++-GDBARGS += -ex 'set riscv use-compressed-breakpoints yes'
++-
++-
++ gdb: 
++-	$(GDB) $(GDBARGS)
+++	$(GDB)
++ 
++ ##
++ ##  FOR testing lab grading script
+diff --git a/user/find.c b/user/find.c
+new file mode 100644
+index 0000000..5bb4e34
+--- /dev/null
++++ b/user/find.c
+@@ -0,0 +1,121 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fs.h"
++
++char *fmtname(char *path) {
++  static char buf[DIRSIZ + 1];
++  char *p;
++
++  // Find first character after last slash.
++  for (p = path + strlen(path); p >= path && *p != '/'; p--)
++    ;
++  p++;
++
++  // Return blank-padded name.
++  if (strlen(p) >= DIRSIZ) return p;
++  memmove(buf, p, strlen(p));
++  memset(buf + strlen(p), ' ', DIRSIZ - strlen(p));
++  return buf;
++}
++
++char *fmtname2(char *path) {
++  static char buf[DIRSIZ + 1];
++  char *p;
++
++  // Find first character after last slash.
++  for (p = path + strlen(path); p >= path && *p != '/'; p--)
++    ;
++  p++;
++
++  // Return blank-padded name.
++  if (strlen(p) >= DIRSIZ) return p;
++  memmove(buf, p, strlen(p));
++  memset(buf + strlen(p), '\0', DIRSIZ - strlen(p));
++  return buf;
++}
++
++void find(char *path,char *purpose_dir){
++    char buf[512], *p;
++    int fd;
++    struct dirent de;
++    struct stat st;
++    
++    if ((fd = open(path, 0)) < 0) {
++        fprintf(2, "ls: cannot open %s\n", path);
++        // printf("open error!!!");
++        return;
++    }
++
++    if (fstat(fd, &st) < 0) {
++        fprintf(2, "ls: cannot stat %s\n", path);
++        close(fd);
++        return;
++    }
++    
++    switch (st.type) {
++        case T_FILE:
++            if (!strcmp(fmtname2(path),purpose_dir)){
++                printf("%s\n",path);
++            }
++            break;
++            
++        case T_DIR:
++            if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf) {
++                printf("ls: path too long\n");
++                break;
++            }
++            strcpy(buf, path);
++            p = buf + strlen(buf);
++            *p++ = '/';
++            
++            while (read(fd, &de, sizeof(de)) == sizeof(de)) {
++                if (de.inum == 0) continue;
++                memmove(p, de.name, DIRSIZ);
++                p[DIRSIZ] = 0;
++                if (stat(buf, &st) < 0) {
++                    printf("ls: cannot stat %s\n", buf);
++                    continue;
++                }
++                
++                if (!strcmp(fmtname2(buf),purpose_dir)){
++                    printf("%s\n",buf);
++                }
++
++                if ((strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)) {
++                    
++                    continue;
++                }
++
++                // if ((strcmp(buf, ".") == 0 || !strcmp(buf, "..") == 0)) {
++                    
++                //     continue;
++                // }
++
++                if ((st.type == T_DIR)&&((strcmp(buf,"\0")))) {
++                    
++                    find(buf, purpose_dir);
++                    
++                }
++
++                }
++            break;
++            
++    }
++    close(fd);
++}
++
++int main(int argc,char* argv[]){
++    //开始路径的文件夹
++    char* start_dir;
++    char* purpose_dir;
++    // 如果提供了参数，则使用提供的目录；否则使用当前目录
++    if (argc > 2){
++        start_dir = argv[1];
++        purpose_dir = argv[2];
++        find(start_dir,purpose_dir);
++    }else{
++        printf("未提供路径 !!! error !!!");
++    }
++    exit(0);
++}
+\ No newline at end of file
+diff --git a/user/pingpong.c b/user/pingpong.c
+new file mode 100644
+index 0000000..d3b35ff
+--- /dev/null
++++ b/user/pingpong.c
+@@ -0,0 +1,68 @@
++#include "kernel/types.h"
++#include "user.h"
++
++int main(int argc, char* argv[]){
++    int pipe1[2]; // 用于父进程到子进程的管道
++    int pipe2[2]; // 用于子进程到父进程的管道
++    char buffer[5];
++    char buffer2[4] = "ping";
++    char buffer3[4] = "pong";
++    int pid;
++    // 创建两个管道
++    pipe(pipe1);
++    pipe(pipe2);
++    int ppid = getpid();
++    // 创建子进程
++    pid = fork();
++    if (pid < 0) {
++        // fork失败
++        printf("fork failed\n");
++        exit(0);
++    }
++    if (pid == 0) {
++        // 子进程
++        close(pipe1[1]); // 关闭写端
++        close(pipe2[0]); // 关闭读端
++
++        // while (read(pipe1[0], buffer, 4)==0){
++
++        // }
++        if (read(pipe1[0], buffer, 4)){
++            // printf("%d: received",getpid());
++            // sprintf(buffer, "from ");
++            // printf("pid %d",getppid());
++            printf("%d: received %s from pid %d\n",getpid(),buffer,ppid);
++        }
++
++        write(pipe2[1], buffer3, 4); // 向父进程写入
++
++        close(pipe1[0]);
++        close(pipe2[1]);
++        exit(0);
++    } else {
++        // 父进程
++        close(pipe1[0]); // 关闭读端
++        close(pipe2[1]); // 关闭写端
++
++        
++        
++        write(pipe1[1], buffer2, 4); // 向子进程写入,写入传向子进程的通道里
++
++        if (read(pipe2[0], buffer, 4)>0){
++            // printf("%d: received ",getpid());
++           // sprintf(buffer, "from ");
++            // printf("pid %d",pid);
++            printf("%d: received %s from pid %d\n",getpid(),buffer,pid);
++            // sprintf(buffer, "from ");
++            // printf("pid %d",pid);
++            // sprintf("%d: received ", buffer," from pid %d",getPid(),pid);
++        }
++         
++
++        close(pipe1[1]);
++        close(pipe2[0]);
++        // wait(); // 等待子进程结束
++    }
++
++    exit(0);
++}
+diff --git a/user/sleep.c b/user/sleep.c
+new file mode 100644
+index 0000000..f79541b
+--- /dev/null
++++ b/user/sleep.c
+@@ -0,0 +1,13 @@
++#include "kernel/types.h"
++#include "user.h"
++
++int main(int argc,char* argv[]){
++    if(argc != 2){
++        printf("Sleep needs one argument!\n");
++        exit(-1);
++    }
++    int ticks = atoi(argv[1]);
++    sleep(ticks);
++    printf("(nothing happens for a little while)\n");
++    exit(0);
++}
+\ No newline at end of file
