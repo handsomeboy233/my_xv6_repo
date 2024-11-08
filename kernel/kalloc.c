@@ -18,15 +18,26 @@ struct run {
   struct run *next;
 };
 
-struct {
+/*struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem;*/
+struct kmem {               //为什么这样改？这两个写法什么区别
+   struct spinlock lock;
+   struct run *freelist;
+};
+struct kmem kmems[NCPU];
+
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  //initlock(&kmem.lock, "kmem");
+  //开始的时候为每一个kemms都要初始化一个锁
+  for (int i=0;i < NCPU;i++){
+    initlock(&kmems[i].lock, "kmem_"+i);
+  }
+
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,10 +67,20 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  //acquire(&kmem.lock);
+  //r->next = kmem.freelist;
+  //kmem.freelist = r;
+  //release(&kmem.lock);
+
+  //获取当前cpu的id
+  push_off();
+  int cpuId = cpuid();
+  pop_off();
+
+  acquire(&kmems[cpuId].lock);
+  r->next = kmems[cpuId].freelist;
+  kmems[cpuId].freelist = r;
+  release(&kmems[cpuId].lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -70,11 +91,37 @@ kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
+  //acquire(&kmem.lock);
+  //r = kmem.freelist;
+
+  //获取当前cpu的id
+  push_off();
+  int cpuId = cpuid();
+  pop_off();
+
+  acquire(&kmems[cpuId].lock);
+  r = kmems[cpuId].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+    //kmem.freelist = r->next;
+  //release(&kmem.lock);
+      kmems[cpuId].freelist = r->next;
+    release(&kmems[cpuId].lock);
+  
+  //?
+  if (!r){
+      for (int i = 0;i < NCPU;i++){
+        if (i == cpuId) continue;
+ 
+         acquire(&kmems[i].lock);
+        r = kmems[i].freelist;
+        if(r)
+          kmems[i].freelist = r->next;
+        release(&kmems[i].lock);
+        if (r) break;
+      }
+  }
+
+
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
