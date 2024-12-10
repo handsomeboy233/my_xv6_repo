@@ -20,6 +20,8 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[];  // trampoline.S
+extern pagetable_t kernel_pagetable;
+
 
 // initialize the proc table at boot time.
 void procinit(void) {
@@ -36,6 +38,7 @@ void procinit(void) {
     if (pa == 0) panic("kalloc");
     uint64 va = KSTACK((int)(p - proc));
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    p->kstack_pa = (uint64)pa;
     p->kstack = va;
   }
   kvminithart();
@@ -111,6 +114,26 @@ found:
     return 0;
   }
 
+   p->k_pagetable = kvminit1();
+  if(p->k_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  char *pa = kalloc();
+  if (pa == 0) {
+    release(&p->lock);
+    return 0;
+  }
+  
+  uint64 va = KSTACK((int)(p - proc));
+  p->kstack_pa = (uint64)pa;
+  kvmmap1(p->k_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+  // p->k_pagetable = kvminit1();
+  // kvmmap1(p->k_pagetable, p->kstack, p->kstack_pa, PGSIZE, PTE_R | PTE_W);
+
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -120,6 +143,22 @@ found:
   return p;
 }
 
+void freekernelpt(pagetable_t pagetable) {
+  // there are 2^9 = 512 PTEs in a page table.
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      pagetable[i] = 0;
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        freekernelpt((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void *)pagetable);
+}
+
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -128,6 +167,9 @@ static void freeproc(struct proc *p) {
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+   uvmunmap(p->k_pagetable, p->kstack, 1, 1);
+  p->kstack = 0;
+  freekernelpt(p->k_pagetable);
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -193,6 +235,7 @@ void userinit(void) {
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  sync_pagetable(p->pagetable, p->k_pagetable, 0, p->sz); //用户地址空间0-sz
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -216,6 +259,9 @@ int growproc(int n) {
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+     // 防止越界
+    if (PGROUNDUP(sz) >= PLIC)  return -1;
+    sync_pagetable(p->pagetable, p->k_pagetable, sz-n, sz);
   } else if (n < 0) {
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
@@ -242,6 +288,10 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
+
+  // 复制到新进程的内核页表
+  sync_pagetable(np->pagetable, np->k_pagetable, 0, np->sz);
+
 
   np->parent = p;
 
@@ -430,8 +480,12 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
@@ -439,6 +493,9 @@ void scheduler(void) {
         found = 1;
       }
       release(&p->lock);
+    }
+     if(!found){
+      kvminithart();
     }
 #if !defined(LAB_FS)
     if (found == 0) {
@@ -621,5 +678,16 @@ void procdump(void) {
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+void sync_pagetable(pagetable_t pagetable, pagetable_t k_pagetable, uint64 fromsz, uint64 endsz){
+  // there are 2^9 = 512 PTEs in a page table.
+  pte_t *u_pte, *k_pte;
+  fromsz = PGROUNDUP(fromsz);
+  for (uint64 i = fromsz; i < endsz; i += PGSIZE){
+    u_pte = walk(pagetable, i, 0);
+    k_pte = walk(k_pagetable, i, 1);
+    *k_pte = *u_pte & ~PTE_U;
   }
 }

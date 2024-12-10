@@ -5,6 +5,9 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h" 
+#include "proc.h"
+
 
 /*
  * the kernel's page table.
@@ -44,6 +47,37 @@ void kvminit() {
   // the highest virtual address in the kernel.
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
+
+pagetable_t kvminit1() {
+  pagetable_t k_pagetable = uvmcreate();
+  if (k_pagetable == 0) return 0;
+
+  // uart registers
+  kvmmap1(k_pagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  kvmmap1(k_pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // // CLINT
+  // kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  kvmmap1(k_pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  kvmmap1(k_pagetable, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  kvmmap1(k_pagetable, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  kvmmap1(k_pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return k_pagetable;
+}
+
+
 
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
@@ -104,6 +138,11 @@ void kvmmap(uint64 va, uint64 pa, uint64 sz, int perm) {
   if (mappages(kernel_pagetable, va, sz, pa, perm) != 0) panic("kvmmap");
 }
 
+void kvmmap1(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if(mappages(pagetable, va, sz, pa, perm) != 0) panic("kvmmap1");
+}
+
+
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
@@ -113,7 +152,8 @@ uint64 kvmpa(uint64 va) {
   pte_t *pte;
   uint64 pa;
 
-  pte = walk(kernel_pagetable, va, 0);
+  //pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->k_pagetable, va, 0);
   if (pte == 0) panic("kvmpa");
   if ((*pte & PTE_V) == 0) panic("kvmpa");
   pa = PTE2PA(*pte);
@@ -242,6 +282,64 @@ void freewalk(pagetable_t pagetable) {
   }
   kfree((void *)pagetable);
 }
+// 页表打印功能 
+void vmprint(pagetable_t pgtbl, int depth, uint64 va_last){
+  // there are 2^9 = 512 PTEs in a page table.
+ // 打印 vmprint 的参数，即获得的页表参数具体的值
+  // printf("page table 0x%p\n",(void*)pgtbl);
+  // 遍历一个页表页的PTE表项 
+  int flag = 0;
+  for (int i = 0; i < 512; i++) {
+    // printf("||");
+    pte_t pte = pgtbl[i];
+    if (pte & PTE_V){
+      
+      if (depth==0) {
+        if (flag ==0) {
+          flag = 1;
+          printf("page table %p\n",(void*)(pgtbl));
+        }
+        printf("||");
+      }
+      else if (depth==1) printf("||   ||");
+      else if (depth==2) printf("||   ||   ||");
+    }
+    /* 判断PTE的Flag位，如果还有下一级页表(即当前是根页表或次页表)，
+       则递归调用freewalk释放页表项，并将对应的PTE清零 */
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      uint64 va = va_last + i;
+      va = va << 9;
+      // 非叶子结点
+      char flags[5] = "rwxu";  // 定义一个字符数组，注意要给空间留出位置（包括 '\0'）
+      if (!(pte & PTE_R)) flags[0] = '-';
+      if (!(pte & PTE_W)) flags[1] = '-';
+      if (!(pte & PTE_X)) flags[2] = '-';
+      if (!(pte & PTE_U)) flags[3] = '-';
+      // uint64 va = (i << 12);  // 计算虚拟地址的索引部分，假设是 12 位偏移
+      uint64 child = PTE2PA(pte); // 将PTE转为物理地址
+      // printf("idx: : pa: , flags: %s\n", flags);  // 打印字符串
+      printf("idx: %d: pa: %p, flags: %s\n", i, (void*)child, flags);  // 打印字符串
+      vmprint((pagetable_t)child,depth+1, va);
+    } else if (pte & PTE_V) {
+      // 叶子结点
+      // 计算虚拟地址
+      uint64 va = va_last + i;
+      va = va << 12;
+      
+      char flags[5] = "rwxu";  // 定义一个字符数组，注意要给空间留出位置（包括 '\0'）
+      if (!(pte & PTE_R)) flags[0] = '-';
+      if (!(pte & PTE_W)) flags[1] = '-';
+      if (!(pte & PTE_X)) flags[2] = '-';
+      if (!(pte & PTE_U)) flags[3] = '-';
+
+      uint64 child = PTE2PA(pte); // 将PTE转为物理地址
+      printf("idx: %d: va: %p -> pa: %p, flags: %s\n", i, (void*)va, (void*)child, flags);  // 打印字符串
+
+    }
+  }
+}
+
+
 
 // Free user memory pages,
 // then free page-table pages.
@@ -311,12 +409,31 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
   }
   return 0;
 }
+// int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
+//   uint64 n, va0, pa0;
+
+//   while (len > 0) {
+//     va0 = PGROUNDDOWN(srcva);
+//     pa0 = walkaddr(pagetable, va0);
+//     if (pa0 == 0) return -1;
+//     n = PGSIZE - (srcva - va0);
+//     if (n > len) n = len;
+//     memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+
+//     len -= n;
+//     dst += n;
+//     srcva = va0 + PGSIZE;
+//   }
+//   return 0;
+// }
+
+
 
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  uint64 n, va0, pa0;
+  /*uint64 n, va0, pa0;
 
   while (len > 0) {
     va0 = PGROUNDDOWN(srcva);
@@ -330,15 +447,20 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
     dst += n;
     srcva = va0 + PGSIZE;
   }
-  return 0;
+  return 0;*/
+   // w_sstatus(r_sstatus() | SSTATUS_SUM);
+  return copyin_new(pagetable, dst, srcva, len);
+  // w_sstatus(r_sstatus() & ~SSTATUS_SUM);
+
 }
 
 // Copy a null-terminated string from user to kernel.
 // Copy bytes to dst from virtual address srcva in a given page table,
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
+
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
-  uint64 n, va0, pa0;
+  /*uint64 n, va0, pa0;
   int got_null = 0;
 
   while (got_null == 0 && max > 0) {
@@ -369,7 +491,8 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
     return 0;
   } else {
     return -1;
-  }
+  }*/
+   return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 // check if use global kpgtbl or not
